@@ -1,0 +1,396 @@
+---
+title: "Bilirubin Gilbert's paper"
+format: html
+editor: visual
+---
+
+## Gilbert's analysis for BMJ medicine
+
+Generate data
+
+Functions:
+
+```{r}
+
+
+ivw_random <- function(df) {
+  TE = df$beta
+  SE = df$se
+  m1 <- metagen(TE, SE) 
+  tibble(estimate = m1$TE.random,
+         std.error= m1$seTE.random,
+         het = m1$pval.Q,
+         pval = m1$pval.random,
+         lower = m1$lower.random,
+         upper = m1$upper.random)
+  
+}
+
+
+
+ivw_fixed <- function(df) {
+  TE = df$beta
+  SE = df$se
+  m1 <- metagen(TE, SE) 
+  tibble(estimate = m1$TE.fixed,
+         std.error= m1$seTE.fixed,
+         het = m1$pval.Q,
+         pval = m1$pval.fixed,
+         lower = m1$lower.fixed,
+         upper = m1$upper.fixed)
+  
+}
+
+
+```
+
+Bring in data - THIS PART WILL NOT WORK AS REQUIRES INDIVIDUAL ACCESS TO UKB
+
+```{r}
+pacman::p_load(tidyverse,vroom, broom, RNOmni, gtsummary, data.table, meta, readxl, gt)
+
+
+#bring in data
+geno_calls <-vroom()
+master <- vroom()
+bilirubin <- vroom()
+
+
+bilirubin <- bilirubin %>%
+  select(eid = f.eid, direct_bili = f.30660.0.0, total_bili = f.30840.0.0)
+
+d <- geno_calls %>%
+  select(IID, gilberts = rs887829_T) %>%
+  left_join(master) %>%
+  left_join(bilirubin)  %>%
+  mutate(homo_only = if_else(gilberts >1,1,0)) %>%
+  mutate(gilberts = as.factor(gilberts))  
+
+
+
+```
+
+Table 1 - WONT WORK
+
+```{r}
+d %>%
+  drop_na(total_bili) %>%
+  mutate(cancer = if_else(is.na(cancer), 0,1),
+         liver_disease = if_else(is.na(liver_disease),0,1)) %>%
+
+  mutate(quartile_bili = ntile(total_bili, 4)) %>%
+  select(quartile_bili, total_bili, gilberts, sex, age_at_entry, townsend, alcohol_intake_freq, diabetes, smoking, bmi, creatinine, crp, cancer, liver_disease) %>%
+  tbl_summary(by = "quartile_bili") %>%
+  add_p()
+  
+```
+
+Table 2 - WONT WORK
+
+```{r}
+  df %>%
+    drop_na(gilberts) %>%
+    mutate(cancer = if_else(is.na(cancer), 0,1),
+           liver_disease = if_else(is.na(liver_disease),0,1)) %>%
+    
+    mutate(quartile_bili = ntile(total_bili, 4)) %>%
+    select(quartile_bili, total_bili, gilberts, sex, age_at_entry, townsend, alcohol_intake_freq, diabetes, smoking, bmi, creatinine, crp, cancer, liver_disease) %>%
+    tbl_summary(by = "gilberts") %>%
+    add_p()
+```
+
+Bring in FinnGen:
+
+```{r}
+finn_res <- vroom("phewas_results/finngen.tab", delim = "\t", col_names = F, skip = 1)
+
+icd_finn <-  read_excel("phewas_results/finngen_endpoints.xlsx")
+orig <- icd_finn %>%
+  select(desc= NAME, COD_ICD_10) %>%
+  mutate(icd_code= substr(COD_ICD_10,1,3)) 
+  
+finn <- finn_res %>%
+  select(pval_f = X7,
+         log10p = X8,
+         beta_f = X9,
+         se_f = X10,
+         desc = X14) %>%
+  mutate(desc= basename(desc)) %>%
+  mutate(desc = str_remove_all(desc, "finngen_R7_|.gz")) %>%
+  left_join(orig)
+
+finn <- finn %>%
+  drop_na(icd_code) %>%
+  group_by(icd_code) %>%
+  slice(1)
+
+```
+
+Bring in results:
+
+```{r}
+
+results_list <- list.files("phewas_results/bilirubin/", recursive = T, full.names = T)
+results_list
+
+bring_master_results <- function(x,name) {
+df <- fread(x)
+df%>%
+  mutate(se = (upper - beta) / 1.96) %>%
+  select(description, beta, n, se, pvalue, upper, lower) %>%
+  arrange(pvalue) %>%
+  mutate(model = name)
+}
+
+
+
+
+```
+
+ICD outcomes: wide data results
+
+Female
+
+```{r}
+female <- bring_master_results(results_list[10], "Female")
+male<- bring_master_results(results_list[12], "Male")
+
+```
+
+```{r}
+
+homo <- bring_master_results(results_list[10], "Gilbert's")
+allele<- bring_master_results(results_list[1], "additive")
+
+
+top_hits <- homo%>%
+  mutate(p_fdr = p.adjust(pvalue, "fdr")) %>%
+  filter(p_fdr < 0.05)
+
+p1 <-homo%>%
+  bind_rows(allele) %>%
+    filter(!str_detect(description, "Month of attending asses")) %>%
+    mutate(name= str_remove_all(description, "Date |first reported|\\(|\\)")) %>%
+   mutate(name = str_remove_all(name, "Operative procedures - main OPCS4:|Operative procedures - OPCS4:")) %>%
+  filter(description %in% top_hits$description) %>%
+  distinct(name,model, .keep_all = T) %>%
+  mutate(model = if_else(model == "Gilbert's", "Recessive (Gilbert's syndrome)", "Additive")) %>%
+  arrange(beta) %>%
+  ggforestplot::forestplot(
+    name = name,
+    se = se,
+    estimate = beta,
+    logodds = T,
+    colour = model
+  ) +
+    theme(legend.position = "bottom") +
+  xlab("OR (95% CI)") +
+  scale_x_log10() 
+
+ggview::ggview(p1, width = 8, height = 6)
+ggsave(width = 8, height = 6, filename = "Figure1.tiff", device = "tiff", bg = "white", compression = "lzw")
+```
+
+Bring in obs data
+
+```{r}
+bring_master_results <- function(x,name) {
+df <- fread(x)
+df%>%
+  filter(varType == "DATE") %>%
+  mutate(se = (upper - beta) / 1.96) %>%
+  select(description, beta, n, se, pvalue, upper, lower) %>%
+  arrange(pvalue) %>%
+  mutate(model = name)
+}
+
+results_list
+obs_raw <- bring_master_results(results_list[18],"Unadjusted") 
+obs_adj <- bring_master_results(results_list[17],"Adjusted") 
+weighted<- bring_master_results(results_list[19],"Genetically predicted") 
+```
+
+Figure 2, 3
+
+```{r}
+
+
+
+
+long <- obs_raw %>% bind_rows(obs_adj, weighted) %>%
+  filter(!str_detect(description, "Month of attending asses|biliru")) %>%
+    mutate(name = str_remove_all(description, "Date |first reported|\\(|\\)")) %>%
+  mutate(icd_code =substr(name,1,3) )
+
+
+top_20_results <- obs_raw%>%
+  head(40) %>%
+  filter(!str_detect(description, "K76"))
+
+top_20_results %>%
+  as_tibble() %>%
+  select(upper)
+
+
+p2 <- long %>%
+  arrange(beta) %>%
+
+  filter(description %in% top_20_results$description) %>%
+  ggforestplot::forestplot(
+    name = name,
+    se = se,
+    estimate = beta,
+    colour = model,
+    logodds = T
+  ) +
+  scale_x_log10() +
+  theme(legend.position = "bottom") +
+  xlab("OR (95% CI)")
+
+ggview::ggview(p2, width = 10, height = 8)
+ggsave(width = 10, height = 8, filename = "Figure2.tiff", device = "tiff", bg = "white", compression = "lzw")
+
+
+
+
+
+p3 <- long %>%
+  filter(pvalue < 0.05) %>%
+  add_count(description) %>%
+  filter(nn >2) %>%
+  arrange(beta) %>% 
+   ggforestplot::forestplot(
+    name = name,
+    se = se,
+    estimate = beta,
+    colour = model,
+    logodds = T
+  ) +
+  scale_x_log10() +
+  theme(legend.position = "bottom") +
+  xlab("OR (95% CI)")
+
+ggview::ggview(p3, width = 10, height = 6)
+ggsave(width = 10, height = 6, filename = "Figure3.tiff", device = "tiff", bg = "white", compression = "lzw")
+
+
+```
+
+Figure 4
+
+```{r}
+
+total <- long %>%
+  filter(pvalue < 0.05) %>%
+  add_count(description) %>%
+  filter(nn >2) %>%
+  group_by(description) %>%
+  mutate(max_b= max(beta), min_b = min(beta)) %>%
+  filter((max_b >0 & min_b > 0) |(max_b <0 & min_b < 0)) %>%
+  ungroup()
+
+
+finn_plot <- finn %>%
+  mutate(icd_code = case_when(
+    icd_code == "M8[" ~ "M81",
+    icd_code == "B1[" ~ "B19",
+    TRUE ~ icd_code
+  )) %>%
+  right_join(total) %>%
+  select(beta = beta_f, se = se_f, icd_code, name, description) %>%
+  mutate(model = "Finngen") 
+
+ma <- allele %>%
+  filter(description %in% total$description) %>%
+  filter(!str_detect(description, "Month of attending asses|biliru")) %>%
+    mutate(name = str_remove_all(description, "Date |first reported|\\(|\\)")) %>%
+  bind_rows(finn_plot) %>%
+  group_by(description) %>%
+  nest() %>%
+  mutate(ivw_res = map(data, ivw_random)) %>%
+  unnest(ivw_res) %>%
+  select(beta = estimate, se = std.error, description, upper, lower, pval) %>%
+  mutate(model = "Meta-analysis")
+
+ma %>%
+  select(description, beta_ma = beta, lower_ma = lower, upper_ma = upper, pval_ma = pval) %>%
+  filter(pval_ma < 0.05)%>%
+  left_join(weighted) %>%
+      mutate(name = str_remove_all(description, "Date |first reported|\\(|\\)")) %>%
+  ungroup() %>%
+  select(name, contains ("ma"), beta, lower, upper, pvalue) %>%
+  mutate(beta = exp(beta), upper = exp(upper), lower = exp(lower), beta_ma = exp(beta_ma),
+         lower_ma = exp(lower_ma), upper_ma = exp(upper_ma)) %>%
+  mutate(across(c(2,3,4,6,7,8), ~ round(.x, digits = 2))) %>%
+  mutate(MA = paste0(beta_ma, " (",lower_ma,",", upper_ma, ")"), 
+         bili = paste0(beta, " (",lower,",", upper, ")")) %>%
+  select(name, MA, pval_ma, bili, pvalue) %>%
+  gt::gt()
+
+
+
+
+onlysig <- ma %>%
+  filter(pval < 0.05)
+
+
+p4 <- allele %>%
+  filter(description %in% total$description) %>%
+  bind_rows(ma) %>%
+  filter(!str_detect(description, "Month of attending asses|biliru")) %>%
+    mutate(name = str_remove_all(description, "Date |first reported|\\(|\\)")) %>%
+  bind_rows(finn_plot) %>%
+  arrange(beta) %>%
+  mutate(model = if_else(model == "additive", "UK Biobank", model)) %>%
+  filter(description %in% onlysig$description) %>%
+  ggforestplot::forestplot(
+    name = name,
+    se = se,
+    estimate = beta,
+    colour = model,
+    logodds = T
+  ) +
+  theme(legend.position = "bottom") +
+  scale_x_continuous() +
+  xlab("Odds ratio per T allele, 95% CI")
+
+p4
+ggview::ggview(p4, width = 9, height = 4)
+ggsave(width = 9, height = 4, filename = "Figure4.tiff", device = "tiff", bg = "white", compression = "lzw")
+```
+
+Print results
+
+```{r}
+
+results_list
+
+to_print <- list(                 "S1 Gilbert's syndrome" = bring_master_results(results_list[11],"Gilbert's genotype (whole cohort)"),
+                                                   "S2 Observational (unadjusted)" = bring_master_results(results_list[18],"Observational (unadjusted)"),
+                 "S3 Observational (adjusted)" = bring_master_results(results_list[17],"Observational (adjusted)"),
+                  "S4 Genetically predicted" = bring_master_results(results_list[19],"Genetically predicted (whole cohort)"),
+  
+  "S5 Additive model" = bring_master_results(results_list[1],"Additive model (whole cohort)"),
+
+                   "S6 Meta-analysis" = ma_total_res,
+
+                 "S7 Never smoker " = bring_master_results(results_list[16],"Never smoker (genetically predicted)"),
+                 "S8 Current smoker" = bring_master_results(results_list[5],"Current smoker (genetically predicted)"),
+                 "S9 Ex Smoker" = bring_master_results(results_list[9],"Ex smoker (genetically predicted)"),
+                  "S10 Female" = bring_master_results(results_list[10],"Female"),
+  "S11 Male" = bring_master_results(results_list[12],"Male")
+  
+                
+  
+  )
+
+ma_total_res %>%
+  mutate(across(c(estimate, lower, upper),exp)) %>%
+  ungroup() %>%
+  select(description, estimate, lower, upper, pval, het) %>%
+  gt::gt()
+
+writexl::write_xlsx(to_print, path = 'bilirubin_results_R2.xlsx')
+# write.xlsx(to_print, file = 'bilirubin_results.xlsx')
+
+```
